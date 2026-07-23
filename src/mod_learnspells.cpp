@@ -1,5 +1,6 @@
 #include "Chat.h"
 #include "Config.h"
+#include "DBCStores.h"
 #include "DisableMgr.h"
 #include "Player.h"
 #include "ScriptMgr.h"
@@ -364,9 +365,11 @@ private:
                             break;
                         }
 
-                        if (GetTalentSpellPos(itr->second->Spell))
-                            if (!prevSpell || !player->HasSpell(prevSpell->Id) || spellInfo->GetRank() == 1)
-                                valid = false;
+                        // Talent-gated chains: require the talent Rank 1 spent in the active spec.
+                        // Do not unlock higher ranks merely because a previous rank was seeded.
+                        uint32 const firstRankId = sSpellMgr->GetFirstSpellInChain(spellInfo->Id);
+                        if (GetTalentSpellCost(firstRankId) > 0 && !player->HasTalent(firstRankId, player->GetActiveSpec()))
+                            valid = false;
 
                         break;
                     }
