@@ -18,7 +18,7 @@ Death Knights follow the same rule, because their whole level curve lives in the
 
 ```bash
 cd modules
-git submodule add https://github.com/VenomekPL/mod-learn-spells.git mod-learn-spells
+git submodule add -b MoonlitNightsServer https://github.com/MoonlitNightsServer/mod-learn-spells.git mod-learn-spells
 # reconfigure CMake, rebuild, copy conf.dist → conf, restart worldserver
 ```
 

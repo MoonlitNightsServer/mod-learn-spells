@@ -398,7 +398,7 @@ private:
                 AddSpell{33943}, // Flight Form
             }},
         }},
-        // Aldrynth: no m_additionalSpells above MaxLevel 55 (trainers / quests / books from 56+)
+        // Anything above the realm cap (LearnSpells.MaxLevel, 60) is never taught: the learner clamps to it.
     };
 
     bool IsIgnoredSpell(uint32 spellID)
