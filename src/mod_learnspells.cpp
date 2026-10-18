@@ -1,4 +1,6 @@
 #include "Chat.h"
+#include "DatabaseEnv.h"
+#include "Log.h"
 #include "Config.h"
 #include "DBCStores.h"
 #include "DisableMgr.h"
@@ -6,13 +8,90 @@
 #include "ScriptMgr.h"
 #include "SpellInfo.h"
 #include "SpellMgr.h"
+#include "WorldScript.h"
+
+#include <algorithm>
+#include <map>
+#include <vector>
+
+// ---------------------------------------------------------------------------
+// Moonlit Nights fork (generation 2)
+//
+// Upstream taught each spell at the level stored in the spell itself (BaseLevel) and needed a hand-made
+// list of exceptions. The Death Knight module compresses its whole curve into its own trainer table, so a
+// spell-level rule can not serve all ten classes. This fork uses ONE rule for every class: a character
+// learns every spell its class trainers sell, at the trainer's required level, once the prerequisites are
+// known (previous rank, required ability, required skill; talent chains only when the talent is spent).
+// The upstream exception lists (ignored spells, extra non-trainer spells) are kept.
+// ~Moonlit Nights Team
+// ---------------------------------------------------------------------------
+
+namespace
+{
+    struct TrainerRow
+    {
+        uint32 spellId;
+        uint32 reqLevel;
+        uint32 reqSkillLine;
+        uint32 reqSkillRank;
+        uint32 reqAbility[3];
+    };
+
+    // class id -> every spell the class's main trainers sell (trainers of type class with at least 50 spells;
+    // the small city trainers that only sell portals and teleports are covered by the extra-spell list)
+    std::map<uint8, std::vector<TrainerRow>> g_trainerRows;
+}
+
+class LearnSpellsWorld : public WorldScript
+{
+public:
+    LearnSpellsWorld() : WorldScript("LearnSpellsWorld", { WORLDHOOK_ON_STARTUP }) { }
+
+    void OnStartup() override
+    {
+        g_trainerRows.clear();
+        QueryResult result = WorldDatabase.Query(
+            "SELECT t.`Requirement`, ts.`SpellId`, MIN(ts.`ReqLevel`), ts.`ReqSkillLine`, ts.`ReqSkillRank`, ts.`ReqAbility1`, ts.`ReqAbility2`, ts.`ReqAbility3` "
+            "FROM `trainer_spell` ts "
+            "JOIN `trainer` t ON t.`Id` = ts.`TrainerId` "
+            "JOIN (SELECT `TrainerId` FROM `trainer_spell` GROUP BY `TrainerId` HAVING COUNT(*) >= 50) m ON m.`TrainerId` = ts.`TrainerId` "
+            "WHERE t.`Type` = 0 "
+            "GROUP BY t.`Requirement`, ts.`SpellId`, ts.`ReqSkillLine`, ts.`ReqSkillRank`, ts.`ReqAbility1`, ts.`ReqAbility2`, ts.`ReqAbility3`");
+
+        uint32 count = 0;
+        if (result)
+        {
+            do
+            {
+                Field* f = result->Fetch();
+                TrainerRow row;
+                uint8 classId = f[0].Get<uint8>();
+                row.spellId = f[1].Get<uint32>();
+                row.reqLevel = f[2].Get<uint32>();
+                row.reqSkillLine = f[3].Get<uint32>();
+                row.reqSkillRank = f[4].Get<uint32>();
+                row.reqAbility[0] = f[5].Get<uint32>();
+                row.reqAbility[1] = f[6].Get<uint32>();
+                row.reqAbility[2] = f[7].Get<uint32>();
+                g_trainerRows[classId].push_back(row);
+                ++count;
+            } while (result->NextRow());
+        }
+
+        for (auto& entry : g_trainerRows)
+            std::sort(entry.second.begin(), entry.second.end(), [](TrainerRow const& a, TrainerRow const& b) { return a.reqLevel < b.reqLevel; });
+
+        LOG_INFO("module", "LearnSpells: loaded {} class trainer spells for {} classes (learned automatically at the trainer level)", count, g_trainerRows.size());
+    }
+};
 
 class LearnSpellsOnLevelUp : public PlayerScript
 {
 public:
     LearnSpellsOnLevelUp() : PlayerScript("LearnSpellsOnLevelUp", {
         PLAYERHOOK_ON_FIRST_LOGIN,
-        PLAYERHOOK_ON_LEVEL_CHANGED
+        PLAYERHOOK_ON_LEVEL_CHANGED,
+        PLAYERHOOK_ON_LOGIN
     }) { }
 
     void OnPlayerFirstLogin(Player* player) override
@@ -29,11 +108,20 @@ public:
         }
     }
 
+    void OnPlayerLogin(Player* player) override
+    {
+        // Catch-up for characters created before the module, or that missed a level-up (idempotent: only unknown spells are learned)
+        if (sConfigMgr->GetOption<bool>("LearnSpells.Enable", true) && sConfigMgr->GetOption<bool>("LearnSpells.OnLogin", true))
+            LearnSpellsForNewLevel(player, 1);
+    }
+
     void OnPlayerLevelChanged(Player* player, uint8 oldLevel) override
     {
         if (sConfigMgr->GetOption<bool>("LearnSpells.Enable", true))
         {
-            if (player->GetLevel() <= sConfigMgr->GetOption<uint8>("LearnSpells.MaxLevel", 80) && oldLevel < player->GetLevel())
+            // Moonlit Nights: no cap test here. The learner clamps to LearnSpells.MaxLevel itself, so a jump past
+            // the cap (e.g. a GM level change from 50 to 70) still teaches everything up to the cap.
+            if (oldLevel < player->GetLevel())
                 LearnSpellsForNewLevel(player, oldLevel);
         }
     }
@@ -302,6 +390,14 @@ private:
                   AddSpell{11419, TeamId::TEAM_ALLIANCE}, // Portal: Darnassus
               }},
         }},
+        // Moonlit Nights: druids get Flight Form when everyone else gets their flying mounts (level 60)
+        {60,
+        {
+            {SPELLFAMILY_DRUID,
+            {
+                AddSpell{33943}, // Flight Form
+            }},
+        }},
         // Aldrynth: no m_additionalSpells above MaxLevel 55 (trainers / quests / books from 56+)
     };
 
@@ -313,24 +409,40 @@ private:
     void LearnSpellsForNewLevel(Player* player, uint8 fromLevel)
     {
         uint8 upToLevel = player->GetLevel();
-        uint8 maxLevel = sConfigMgr->GetOption<uint8>("LearnSpells.MaxLevel", 55);
+        uint8 maxLevel = sConfigMgr->GetOption<uint8>("LearnSpells.MaxLevel", 60);
         if (upToLevel > maxLevel)
             upToLevel = maxLevel;
 
         uint32 family = GetSpellFamily(player);
 
         for (int level = fromLevel; level <= upToLevel; level++)
-        {
             ApplyAdditionalSpells(level, family, player);
 
-            for (uint32 i = 0; i < sSpellMgr->GetSpellInfoStoreSize(); ++i)
-            {
-                SpellInfo const* spellInfo = sSpellMgr->GetSpellInfo(i);
+        LearnTrainerSpells(player, upToLevel);
+    }
 
-                if (!spellInfo)
+    // The one rule for all ten classes: learn what the class trainers sell, at the trainer's level.
+    void LearnTrainerSpells(Player* player, uint8 upToLevel)
+    {
+        auto rows = g_trainerRows.find(player->getClass());
+        if (rows == g_trainerRows.end())
+            return;
+
+        // Ranks unlock each other, so repeat until a pass learns nothing (a chain has at most ~8 ranks)
+        for (int pass = 0; pass < 10; ++pass)
+        {
+            bool learnedAny = false;
+
+            for (TrainerRow const& row : rows->second)
+            {
+                if (row.reqLevel > upToLevel)
+                    break; // rows are sorted by level
+
+                if (player->HasSpell(row.spellId) || IsIgnoredSpell(row.spellId))
                     continue;
 
-                if (spellInfo->SpellFamilyName != family)
+                SpellInfo const* spellInfo = sSpellMgr->GetSpellInfo(row.spellId);
+                if (!spellInfo)
                     continue;
 
                 if ((spellInfo->AttributesEx7 & SPELL_ATTR7_ALLIANCE_SPECIFIC_SPELL && player->GetTeamId() != TEAM_ALLIANCE) || (spellInfo->AttributesEx7 & SPELL_ATTR7_HORDE_SPECIFIC_SPELL && player->GetTeamId() != TEAM_HORDE))
@@ -339,45 +451,35 @@ private:
                 if (spellInfo->PowerType == POWER_FOCUS)
                     continue;
 
-                if (IsIgnoredSpell(spellInfo->Id))
+                if (DisableMgr::IsDisabledFor(DISABLE_TYPE_SPELL, row.spellId, player))
                     continue;
 
-                if (DisableMgr::IsDisabledFor(DISABLE_TYPE_SPELL, spellInfo->Id, player))
+                bool ready = true;
+                for (uint32 req : row.reqAbility)
+                    if (req && !player->HasSpell(req))
+                        ready = false;
+
+                if (row.reqSkillLine && player->GetSkillValue(row.reqSkillLine) < row.reqSkillRank)
+                    ready = false;
+
+                SpellInfo const* prevSpell = spellInfo->GetPrevRankSpell();
+                if (prevSpell && !player->HasSpell(prevSpell->Id))
+                    ready = false;
+
+                // Talent-gated chains: the talent's Rank 1 must be spent in the active spec
+                uint32 const firstRankId = sSpellMgr->GetFirstSpellInChain(row.spellId);
+                if (GetTalentSpellCost(firstRankId) > 0 && !player->HasTalent(firstRankId, player->GetActiveSpec()))
+                    ready = false;
+
+                if (!ready)
                     continue;
 
-                if (spellInfo->BaseLevel != uint32(level) && sSpellMgr->IsSpellValid(spellInfo))
-                    continue;
-
-                bool valid = false;
-
-                SkillLineAbilityMapBounds bounds = sSpellMgr->GetSkillLineAbilityMapBounds(spellInfo->Id);
-
-                for (auto itr = bounds.first; itr != bounds.second; ++itr)
-                {
-                    if (itr->second->Spell == spellInfo->Id && itr->second->RaceMask == 0 && itr->second->AcquireMethod == 0)
-                    {
-                        valid = true;
-                        SpellInfo const* prevSpell = spellInfo->GetPrevRankSpell();
-
-                        if (prevSpell && !player->HasSpell(prevSpell->Id))
-                        {
-                            valid = false;
-                            break;
-                        }
-
-                        // Talent-gated chains: require the talent Rank 1 spent in the active spec.
-                        // Do not unlock higher ranks merely because a previous rank was seeded.
-                        uint32 const firstRankId = sSpellMgr->GetFirstSpellInChain(spellInfo->Id);
-                        if (GetTalentSpellCost(firstRankId) > 0 && !player->HasTalent(firstRankId, player->GetActiveSpec()))
-                            valid = false;
-
-                        break;
-                    }
-                }
-
-                if (valid)
-                    player->learnSpell(spellInfo->Id);
+                player->learnSpell(row.spellId);
+                learnedAny = true;
             }
+
+            if (!learnedAny)
+                break;
         }
     }
 
@@ -433,5 +535,6 @@ private:
 
 void AddSC_LearnAllSpells()
 {
+    new LearnSpellsWorld();
     new LearnSpellsOnLevelUp();
 }

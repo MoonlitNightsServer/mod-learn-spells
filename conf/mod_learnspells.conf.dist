@@ -19,6 +19,12 @@ LearnSpells.Announce = 0
 LearnSpells.OnFirstLogin = 0
 
 # Max level Limit the player will learn spells
-# Aldrynth: 55 — levels 56–80 train from class trainers as normal
+# Moonlit Nights: 60 for every class (the realm's level cap)
 
-LearnSpells.MaxLevel = 55
+LearnSpells.MaxLevel = 60
+
+# Catch up on login: learn any trainer spell the character qualifies for but does not know yet
+# (covers characters created before the module and level changes made by commands)
+# (1: true | 0: false)
+
+LearnSpells.OnLogin = 1
