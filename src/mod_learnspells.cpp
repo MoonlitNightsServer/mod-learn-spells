@@ -179,6 +179,14 @@ private:
                 AddSpell{348}, // Immolate
             }},
         }},
+        {4,
+        {
+            // Moonlit Nights: rank 1 is a quest spell, the trainer's later ranks need it
+            {SPELLFAMILY_SHAMAN,
+            {
+                AddSpell{8071}, // Stoneskin Totem (R1)
+            }},
+        }},
         {6,
         {
             {SPELLFAMILY_WARRIOR,
@@ -205,6 +213,15 @@ private:
                 AddSpell{6991}, // Tier füttern
                 AddSpell{883}, // Pet Call
                 AddSpell{2641}, //Dismiss
+            }},
+            // Moonlit Nights: rank 1 of these is a quest spell, and the trainer's later ranks need it, so nothing else would ever teach them
+            {SPELLFAMILY_DRUID,
+            {
+                AddSpell{6807}, // Maul (R1)
+            }},
+            {SPELLFAMILY_SHAMAN,
+            {
+                AddSpell{3599}, // Searing Totem (R1)
             }},
         }},
         {12,
@@ -246,6 +263,10 @@ private:
             {SPELLFAMILY_HUNTER,
             {
                 AddSpell{674}, // dual wield
+            }},
+            {SPELLFAMILY_SHAMAN,
+            {
+                AddSpell{5394}, // Healing Stream Totem (R1)
             }},
             // Aldrynth: Felsteed / paladin warhorse are quest rewards — not auto-taught
             {SPELLFAMILY_MAGE,
